@@ -1,0 +1,26 @@
+# Secrets and Environment Variables
+.env
+.env.*
+!.env.example
+
+# Credentials & Service Account JSON files
+credentials.json
+credentials*.json
+*.json.json
+
+# Python Bytecode and Cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+
+# IDE and System Files
+.vscode/
+.idea/
+.DS_Store
