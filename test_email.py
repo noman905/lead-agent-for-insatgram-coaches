@@ -1,6 +1,12 @@
 import sys
 import config
-from email_notifier import send_completion_notification, send_failure_notification, send_email
+from email_notifier import (
+    send_summary_notification,
+    send_apify_credits_alert,
+    send_completion_notification,
+    send_failure_notification,
+    send_email
+)
 
 def run_isolated_email_test():
     print("=" * 70)
@@ -18,6 +24,15 @@ def run_isolated_email_test():
     print(f"    - Recipient Email: {recipient if recipient else '[NOT SET]'}")
     print("-" * 70)
 
+    # Sample batch data
+    sample_done = [
+        {"row_number": 2, "niche": "career coach", "state": "Connecticut", "leads_added": 8, "duplicates_skipped": 2, "total_found": 10},
+        {"row_number": 4, "niche": "life coach", "state": "Florida", "leads_added": 12, "duplicates_skipped": 3, "total_found": 15}
+    ]
+    sample_failed = [
+        {"row_number": 3, "niche": "business coach", "state": "Texas", "error": "Google Search actor returned 0 results for this query."}
+    ]
+
     if not sender or sender.strip().lower() in ("", "your_email@gmail.com", "your_gmail_address@gmail.com"):
         print("[NOTE] EMAIL_ADDRESS is currently set to placeholder in .env.")
         print("To test live email delivery, please edit your .env file and set:")
@@ -26,45 +41,37 @@ def run_isolated_email_test():
         print("    RECIPIENT_EMAIL=your_recipient_email@gmail.com")
         print("-" * 70)
 
-        print("[DEMO] Generating email template previews for verification...")
-        
-        demo_subject = "[TEST] Demo Run Finished - career coach / Connecticut"
-
-        demo_body = (
-            "Hello,\n\n"
-            "This is a preview of the email notification system:\n"
-            "- Niche: career coach\n"
-            "- State: Connecticut\n"
-            "- Leads Added: 8\n"
-            "- Duplicates Skipped: 2\n"
-        )
-        print(f"\n[SUBJECT PREVIEW]:\n{demo_subject}")
-        print(f"\n[BODY PREVIEW]:\n{demo_body}")
+        print("[DEMO] Generating Summary Email Preview:")
+        print("-" * 50)
+        # Mock send_email to print template
+        old_send_email = getattr(config, "_mock", None)
+        send_summary_notification(done_jobs=sample_done, failed_jobs=sample_failed, total_leads_added=20)
+        print("-" * 50)
+        print("[DEMO] Generating Apify Credits Alert Preview:")
+        print("-" * 50)
+        send_apify_credits_alert(niche="career coach", state="Connecticut", reason="Monthly usage limit exceeded (402 Payment Required)")
         print("=" * 70)
         print(" [NOTE] Please update .env with your email credentials to test live SMTP sending.")
         print("=" * 70)
         return
 
-    print("[+] Sending Test 1: Completion Email Notification...")
-    success1 = send_completion_notification(
-        niche="career coach",
-        state="Connecticut",
-        leads_added=8,
-        duplicates_skipped=2,
-        total_found=10,
-        notes="Isolation test email dispatch successful"
+    print("[+] Sending Test 1: Consolidated Summary Email Notification...")
+    success1 = send_summary_notification(
+        done_jobs=sample_done,
+        failed_jobs=sample_failed,
+        total_leads_added=20
     )
 
-    print("\n[+] Sending Test 2: Failure Alert Email Notification...")
-    success2 = send_failure_notification(
+    print("\n[+] Sending Test 2: Urgent Apify Credits Alert Email...")
+    success2 = send_apify_credits_alert(
         niche="career coach",
         state="Connecticut",
-        reason="Zero results found during search test"
+        reason="Monthly usage limit exceeded (HTTP 402)"
     )
 
     print("\n" + "=" * 70)
     if success1 and success2:
-        print(" [SUCCESS] Both test emails were dispatched cleanly! Check your inbox.")
+        print(" [SUCCESS] Both summary and alert test emails were dispatched cleanly! Check your inbox.")
     else:
         print(" [WARNING] One or more emails could not be sent. Check SMTP settings/logs.")
     print("=" * 70)

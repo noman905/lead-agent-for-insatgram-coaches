@@ -90,9 +90,7 @@ def send_failure_notification(niche: str, state: str, reason: str) -> bool:
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     subject = f"[ALERT] Instagram Lead Run Failed - {niche} / {state}"
 
-
-    body = f"""
-Hello,
+    body = f"""Hello,
 
 The Instagram Lead Generation Agent encountered an issue during processing.
 
@@ -111,3 +109,110 @@ Best regards,
 Instagram Lead Generation Agent
 """
     return send_email(subject, body)
+
+
+def send_summary_notification(done_jobs: list[dict], failed_jobs: list[dict], total_leads_added: int = 0) -> bool:
+    """
+    Sends a consolidated run summary email at the end of all jobs, showing:
+    - How many jobs were Done
+    - How many Failed
+    - Details of successful jobs
+    - Which jobs Failed with their specific error reason
+    """
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    done_count = len(done_jobs)
+    failed_count = len(failed_jobs)
+    total_processed = done_count + failed_count
+
+    subject = f"[SUMMARY] Instagram Lead Pipeline Finished - {done_count} Done, {failed_count} Failed"
+
+    # Build sections for Done and Failed jobs
+    done_section_lines = []
+    if done_jobs:
+        for idx, j in enumerate(done_jobs, start=1):
+            row_str = f"Row {j.get('row_number')}: " if j.get('row_number') else ""
+            niche_str = j.get('niche', 'N/A')
+            state_str = j.get('state', 'N/A')
+            leads_str = j.get('leads_added', 0)
+            dups_str = j.get('duplicates_skipped', 0)
+            done_section_lines.append(f"  {idx}. {row_str}[{niche_str} / {state_str}] -> {leads_str} new lead(s) added, {dups_str} duplicate(s) skipped")
+    else:
+        done_section_lines.append("  (None)")
+
+    failed_section_lines = []
+    if failed_jobs:
+        for idx, j in enumerate(failed_jobs, start=1):
+            row_str = f"Row {j.get('row_number')}: " if j.get('row_number') else ""
+            niche_str = j.get('niche', 'N/A')
+            state_str = j.get('state', 'N/A')
+            err_reason = j.get('error', 'Unknown error')
+            failed_section_lines.append(f"  {idx}. {row_str}[{niche_str} / {state_str}]\n     Reason: {err_reason}")
+    else:
+        failed_section_lines.append("  (None)")
+
+    done_section = "\n".join(done_section_lines)
+    failed_section = "\n".join(failed_section_lines)
+
+    body = f"""Hello,
+
+The Instagram Lead Generation Agent has completed processing the current queue.
+
+==================================================
+PIPELINE EXECUTION SUMMARY
+==================================================
+- Timestamp:            {timestamp}
+- Total Jobs Processed: {total_processed}
+- Jobs Done (Success):  {done_count}
+- Jobs Failed:          {failed_count}
+- Total New Leads:      {total_leads_added}
+==================================================
+
+SUCCESSFUL JOBS ({done_count}):
+{done_section}
+
+FAILED JOBS ({failed_count}):
+{failed_section}
+
+==================================================
+All new leads have been recorded in your Google Sheet ('Leads' tab).
+Audit details are available in the 'Run Log' and 'Control' tabs.
+
+Best regards,
+Instagram Lead Generation Agent
+"""
+    return send_email(subject, body)
+
+
+def send_apify_credits_alert(niche: str = "", state: str = "", reason: str = "") -> bool:
+    """
+    Sends an urgent alert email when Apify credits or usage limits are exhausted,
+    explicitly notifying the user that the pipeline was stopped and remaining jobs
+    were left as Pending.
+    """
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    subject = "[URGENT] Apify credits are out — pipeline stopped."
+
+    job_info = f"[{niche} / {state}]" if (niche or state) else "Active search job"
+
+    body = f"""Hello,
+
+Apify credits are out — pipeline stopped.
+
+==================================================
+URGENT ALERT DETAILS
+==================================================
+- Timestamp:       {timestamp}
+- Triggering Job:  {job_info}
+- Reason / Error:  {reason if reason else 'Apify credit / usage limit exceeded.'}
+==================================================
+
+ACTION REQUIRED:
+1. Please refill or upgrade your Apify account credits / compute units.
+2. Remaining rows in the Control tab have been left as 'Pending'.
+3. The pipeline will automatically resume and process remaining jobs on the next run once credits are refilled.
+
+Best regards,
+Instagram Lead Generation Agent
+"""
+    return send_email(subject, body)
+

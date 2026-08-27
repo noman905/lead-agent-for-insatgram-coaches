@@ -292,7 +292,12 @@ def fetch_instagram_profile_details(profile_urls: list[str], api_token: str = No
     print(f"    - Pass 1: Scraping {len(clean_urls)} URL(s)...")
 
     run_1 = client.actor("apify/instagram-scraper").call(run_input=run_input_1)
+    status_1 = run_1.get("status") if isinstance(run_1, dict) else getattr(run_1, "status", None)
+    status_msg_1 = run_1.get("statusMessage") if isinstance(run_1, dict) else getattr(run_1, "status_message", getattr(run_1, "statusMessage", ""))
     dataset_id_1 = run_1.get("defaultDatasetId") if isinstance(run_1, dict) else getattr(run_1, "default_dataset_id", getattr(run_1, "defaultDatasetId", None))
+
+    if status_1 and status_1 in ("FAILED", "ABORTED", "TIMED-OUT"):
+        raise RuntimeError(f"Apify Instagram actor run failed with status '{status_1}': {status_msg_1 or 'Execution incomplete'}")
 
     profiles_dict = {}
     unresolved_usernames = set()

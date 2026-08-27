@@ -5,15 +5,78 @@ import traceback
 import gspread
 import config
 
-from test_sheet import ensure_sheet_structure, get_control_jobs, update_job_status, append_run_log_entry, append_error_log_entry
-from google_scraper import fetch_instagram_profiles_from_google, build_search_query
-from instagram_scraper import fetch_instagram_profile_details, filter_and_clean_profile_urls, extract_username_from_url, clean_and_validate_instagram_url
-from leads_writer import get_existing_usernames, write_new_leads
-from email_notifier import send_completion_notification, send_failure_notification
+from test_sheet import ensure_sheet_structure, get_control_jobs, update_job_status, append_run_log_entry
+from google_scraper import fetch_instagram_profiles_from_google
+from instagram_scraper import fetch_instagram_profile_details
+from leads_writer import write_new_leads
+from email_notifier import send_summary_notification, send_apify_credits_alert
 
 
+class ApifyCreditsExhaustedError(Exception):
+    """Raised when Apify credits or usage limits are exhausted."""
+    pass
 
-def process_single_job(sh, control_sheet, job: dict) -> bool:
+
+def is_apify_credit_exhausted(err: Exception | str) -> bool:
+    """
+    Checks if an exception or error message indicates that Apify credits
+    or compute unit usage limits are exhausted.
+    """
+    if isinstance(err, ApifyCreditsExhaustedError):
+        return True
+
+    # 1. Check HTTP status code on ApifyApiError / ApifyClientError
+    status_code = getattr(err, "status_code", None)
+    if status_code == 402:  # 402 Payment Required
+        return True
+
+    # 2. Check error type attribute from Apify response payload
+    err_type = str(getattr(err, "type", "")).lower()
+    if any(k in err_type for k in ["usage-limit", "monthly-usage", "credit", "payment-required", "quota", "limit-exceeded"]):
+        return True
+
+    # 3. Check text string representations
+    msg = str(err).lower()
+    credit_indicators = [
+        "monthly usage limit exceeded",
+        "usage limit exceeded",
+        "usage limit",
+        "credits exhausted",
+        "out of credit",
+        "out of credits",
+        "insufficient credit",
+        "not enough credit",
+        "credit limit",
+        "monthly-usage-limit-exceeded",
+        "usage-limit-exceeded",
+        "payment required",
+        "compute units limit",
+        "exceeded your usage limit",
+        "exceeded its free usage limit",
+        "reached its monthly usage limit",
+        "reached your monthly usage limit",
+        "account has run out of credit",
+        "plan limit exceeded",
+        "quota exceeded",
+        "credits are out"
+    ]
+    return any(indicator in msg for indicator in credit_indicators)
+
+
+def process_single_job(sh, control_sheet, job: dict) -> dict:
+    """
+    Executes a single search & scrape job.
+    Returns a dict with:
+      - 'status': 'Done' or 'Failed'
+      - 'row_number': int
+      - 'niche': str
+      - 'state': str
+      - 'leads_added': int (if Done)
+      - 'duplicates_skipped': int (if Done)
+      - 'total_found': int (if Done)
+      - 'error': str (if Failed)
+    Raises ApifyCreditsExhaustedError if Apify credits are out.
+    """
     row_num = job["row_number"]
     niche = job["niche"]
     state = job["state"]
@@ -32,20 +95,21 @@ def process_single_job(sh, control_sheet, job: dict) -> bool:
     update_job_status(control_sheet, row_num, "Running")
 
     try:
-        # 2. Step 2: Google Search Scraper
-        query_string, raw_urls = fetch_instagram_profiles_from_google(
+        # 2. Step 2: Google Search Scraper (includes retry, filtering, normalization, dedup, cross-check)
+        query_string, clean_urls = fetch_instagram_profiles_from_google(
             niche=niche,
             state=state,
             pages=pages,
-            api_token=config.APIFY_API_TOKEN
+            api_token=config.APIFY_API_TOKEN,
+            sh=sh
         )
-        total_raw_found = len(raw_urls)
+        total_raw_found = len(clean_urls)
 
-        # Check for zero results
+        # Check for zero results (primary + retry both returned 0)
         if total_raw_found == 0:
-            err_msg = "Google Search actor returned 0 results for this query."
+            err_msg = "Google Search actor returned 0 results after retry"
             print(f"[WARNING] {err_msg}")
-            update_job_status(control_sheet, row_num, "Failed")
+            update_job_status(control_sheet, row_num, f"Failed: {err_msg}")
             append_run_log_entry(
                 sh=sh,
                 niche=niche,
@@ -58,72 +122,26 @@ def process_single_job(sh, control_sheet, job: dict) -> bool:
                 status="Failed",
                 notes=err_msg
             )
-            # Send failure email for zero results
-            send_failure_notification(niche, state, err_msg)
-            return False
+            return {
+                "status": "Failed",
+                "row_number": row_num,
+                "niche": niche,
+                "state": state,
+                "error": err_msg
+            }
 
-        # 3. Filter URLs for direct profiles and deduplicate against existing sheet handles BEFORE scraping
-        clean_profile_urls = []
-        invalid_extraction_urls = []
-
-        for url in raw_urls:
-            is_valid, clean_u, reason = clean_and_validate_instagram_url(url)
-            if is_valid:
-                clean_profile_urls.append(clean_u)
-            else:
-                invalid_extraction_urls.append((url, reason))
-                append_error_log_entry(
-                    sh=sh,
-                    niche=niche,
-                    state=state,
-                    invalid_url=url,
-                    error_reason=f"invalid URL format, skipped enrichment ({reason})",
-                    stage="Extraction"
-                )
-
-        garbage_skipped = total_raw_found - len(clean_profile_urls)
-
-        existing_handles = get_existing_usernames(sh)
-        urls_to_scrape = []
-        pre_duplicates_count = 0
-
-        for url in clean_profile_urls:
-            handle = extract_username_from_url(url).lower()
-            if handle in existing_handles:
-                pre_duplicates_count += 1
-                print(f"    - [CREDIT SAVED] Skipping handle @{handle} before scraping (already in Leads tab).")
-            else:
-                # Pre-enrichment regex check
-                is_valid, clean_u, reason = clean_and_validate_instagram_url(url)
-                if is_valid:
-                    urls_to_scrape.append(clean_u)
-                else:
-                    print(f"    - [SKIPPED ENRICHMENT] Invalid URL format for '{url}': {reason}")
-                    append_error_log_entry(
-                        sh=sh,
-                        niche=niche,
-                        state=state,
-                        invalid_url=url,
-                        error_reason=f"invalid URL format, skipped enrichment ({reason})",
-                        stage="Pre-Enrichment"
-                    )
-
-        print(f"[+] Total raw Google URLs:        {total_raw_found}")
-        print(f"[+] Valid profile URLs:          {len(clean_profile_urls)}")
-        print(f"[+] Non-profile/garbage links:   {garbage_skipped}")
-        print(f"[+] Pre-known duplicate handles: {pre_duplicates_count}")
-        print(f"[+] Profiles to scrape via Apify: {len(urls_to_scrape)}")
+        print(f"[+] Clean new URLs to scrape via Apify: {total_raw_found}")
         print("-" * 70)
 
-        # 4. Step 3: Instagram Profile Scraper
+        # 3. Step 3: Instagram Profile Scraper
         scraped_profiles = []
-        if urls_to_scrape:
+        if clean_urls:
             scraped_profiles = fetch_instagram_profile_details(
-                profile_urls=urls_to_scrape,
+                profile_urls=clean_urls,
                 api_token=config.APIFY_API_TOKEN
             )
 
-        # 5. Step 4: Write New Leads to Google Sheet Leads tab
+        # 4. Step 4: Write New Leads to Google Sheet Leads tab
         leads_added, write_duplicates, written_leads = write_new_leads(
             sh=sh,
             profiles=scraped_profiles,
@@ -131,13 +149,12 @@ def process_single_job(sh, control_sheet, job: dict) -> bool:
             state=state
         )
 
+        total_duplicates_skipped = write_duplicates
 
-        total_duplicates_skipped = pre_duplicates_count + write_duplicates
-
-        # 6. Update Status to 'Done' in Control tab
+        # 5. Update Status to 'Done' in Control tab
         update_job_status(control_sheet, row_num, "Done")
 
-        # 7. Append Audit Log entry in 'Run Log' tab
+        # 6. Append Audit Log entry in 'Run Log' tab
         issues = [
             f"@{p['username']} ({p.get('scrape_status', 'Issue')})"
             for p in scraped_profiles
@@ -155,19 +172,8 @@ def process_single_job(sh, control_sheet, job: dict) -> bool:
             total_profiles=total_raw_found,
             leads_added=leads_added,
             duplicates_skipped=total_duplicates_skipped,
-            garbage_skipped=garbage_skipped,
+            garbage_skipped=0,
             status="Done",
-            notes=notes_summary
-        )
-
-        # 8. Step 5: Send Completion Email Notification
-        print(f"[+] Sending completion email notification for [{niche} / {state}]...")
-        send_completion_notification(
-            niche=niche,
-            state=state,
-            leads_added=leads_added,
-            duplicates_skipped=total_duplicates_skipped,
-            total_found=total_raw_found,
             notes=notes_summary
         )
 
@@ -179,15 +185,43 @@ def process_single_job(sh, control_sheet, job: dict) -> bool:
         print(f"  * Duplicates Skipped: {total_duplicates_skipped}")
         print(f"  * Status:             Done")
         print("=" * 70)
-        return True
+
+        return {
+            "status": "Done",
+            "row_number": row_num,
+            "niche": niche,
+            "state": state,
+            "leads_added": leads_added,
+            "duplicates_skipped": total_duplicates_skipped,
+            "total_found": total_raw_found
+        }
 
     except Exception as err:
         err_msg = str(err)
+        # Check if error is due to Apify credits exhaustion
+        if is_apify_credit_exhausted(err):
+            print(f"\n[CRITICAL] Apify credits exhausted on Row {row_num} [{niche} / {state}]: {err_msg}")
+            # Reset row back to 'Pending' so it runs automatically next time
+            update_job_status(control_sheet, row_num, "Pending")
+            append_run_log_entry(
+                sh=sh,
+                niche=niche,
+                state=state,
+                pages_searched=pages,
+                total_profiles=0,
+                leads_added=0,
+                duplicates_skipped=0,
+                garbage_skipped=0,
+                status="Pending (Credits Out)",
+                notes=f"Halted: Apify credits exhausted ({err_msg[:150]})"
+            )
+            raise ApifyCreditsExhaustedError(err_msg)
+
         print(f"\n[ERROR] Job execution failed for Row {row_num} [{niche} / {state}]: {err_msg}")
         traceback.print_exc()
 
-        # Mark Status as 'Failed' in Control tab
-        update_job_status(control_sheet, row_num, "Failed")
+        # Mark Status as 'Failed: <reason>' in Control tab
+        update_job_status(control_sheet, row_num, f"Failed: {err_msg}")
 
         # Record failure in 'Run Log' tab
         append_run_log_entry(
@@ -203,9 +237,13 @@ def process_single_job(sh, control_sheet, job: dict) -> bool:
             notes=f"Error: {err_msg[:200]}"
         )
 
-        # Send failure alert email
-        send_failure_notification(niche, state, err_msg)
-        return False
+        return {
+            "status": "Failed",
+            "row_number": row_num,
+            "niche": niche,
+            "state": state,
+            "error": err_msg
+        }
 
 
 def run_agent():
@@ -253,23 +291,91 @@ def run_agent():
         return
 
     # 3. Process Pending Jobs sequentially
-    success_count = 0
-    failed_count = 0
+    done_jobs = []
+    failed_jobs = []
+    credits_exhausted = False
+    credit_exhaustion_job = None
+    credit_exhaustion_reason = ""
 
     for idx, job in enumerate(pending_jobs, start=1):
         print(f"\n>>> Processing Queue Item {idx} of {len(pending_jobs)} <<<")
-        success = process_single_job(sh, control_sheet, job)
-        if success:
-            success_count += 1
-        else:
-            failed_count += 1
+        try:
+            result = process_single_job(sh, control_sheet, job)
+            if result.get("status") == "Done":
+                done_jobs.append(result)
+            else:
+                failed_jobs.append(result)
+                print(f"[-] Row {job['row_number']} failed ({result.get('error')}). Continuing to next pending job...")
+        except ApifyCreditsExhaustedError as ce:
+            credits_exhausted = True
+            credit_exhaustion_job = job
+            credit_exhaustion_reason = str(ce)
+            print("\n" + "!" * 70)
+            print(" [CRITICAL] APIFY CREDITS EXHAUSTED — STOPPING PIPELINE IMMEDIATELY")
+            print(" Remaining jobs in queue left as 'Pending'.")
+            print("!" * 70)
+            break
+        except Exception as unexpected_err:
+            if is_apify_credit_exhausted(unexpected_err):
+                credits_exhausted = True
+                credit_exhaustion_job = job
+                credit_exhaustion_reason = str(unexpected_err)
+                try:
+                    update_job_status(control_sheet, job["row_number"], "Pending")
+                except Exception:
+                    pass
+                print("\n" + "!" * 70)
+                print(" [CRITICAL] APIFY CREDITS EXHAUSTED — STOPPING PIPELINE IMMEDIATELY")
+                print("!" * 70)
+                break
+            else:
+                err_str = str(unexpected_err)
+                try:
+                    update_job_status(control_sheet, job["row_number"], f"Failed: {err_str}")
+                except Exception:
+                    pass
+                failed_jobs.append({
+                    "status": "Failed",
+                    "row_number": job["row_number"],
+                    "niche": job["niche"],
+                    "state": job["state"],
+                    "error": err_str
+                })
+                print(f"[-] Row {job['row_number']} failed ({err_str}). Continuing to next pending job...")
+
+    # 4. Handle Pipeline Exit & Email Notifications
+    if credits_exhausted:
+        niche = credit_exhaustion_job.get("niche", "") if credit_exhaustion_job else ""
+        state = credit_exhaustion_job.get("state", "") if credit_exhaustion_job else ""
+        print("\n[+] Sending urgent alert email: 'Apify credits are out — pipeline stopped.'...")
+        send_apify_credits_alert(niche=niche, state=state, reason=credit_exhaustion_reason)
+
+        print("\n" + "=" * 70)
+        print(" [STOPPED] PIPELINE HALTED (APIFY CREDITS EXHAUSTED)")
+        print(f"  * Jobs Completed (Done): {len(done_jobs)}")
+        print(f"  * Jobs Failed:           {len(failed_jobs)}")
+        print(f"  * Remaining Jobs:        Preserved as 'Pending'")
+        print("=" * 70)
+        return
+
+    total_leads_added = sum(j.get("leads_added", 0) for j in done_jobs)
 
     print("\n" + "=" * 70)
     print(" [FINISHED] ALL QUEUE JOBS PROCESSED")
     print(f"  * Total Pending Processed: {len(pending_jobs)}")
-    print(f"  * Successful Runs:        {success_count}")
-    print(f"  * Failed Runs:            {failed_count}")
+    print(f"  * Successful Runs (Done): {len(done_jobs)}")
+    print(f"  * Failed Runs:            {len(failed_jobs)}")
+    print(f"  * Total New Leads Added:  {total_leads_added}")
     print("=" * 70)
+
+    # 5. Send one consolidated summary email at the end of all jobs
+    if done_jobs or failed_jobs:
+        print("[+] Sending end-of-run consolidated summary email...")
+        send_summary_notification(
+            done_jobs=done_jobs,
+            failed_jobs=failed_jobs,
+            total_leads_added=total_leads_added
+        )
 
 
 if __name__ == "__main__":

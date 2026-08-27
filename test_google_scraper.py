@@ -1,7 +1,7 @@
 import os
 import sys
 import config
-from google_scraper import fetch_instagram_profiles_from_google, build_search_query
+from google_scraper import fetch_instagram_profiles_from_google, build_search_query, build_retry_query
 
 def run_isolated_google_search_test():
     print("=" * 70)
@@ -56,7 +56,9 @@ def run_isolated_google_search_test():
 
     # 3. Construct Query
     query = build_search_query(niche, state)
-    print(f"[+] Constructed Google Query: {query}")
+    retry_query = build_retry_query(niche, state)
+    print(f"[+] Primary Google Query:  {query}")
+    print(f"[+] Retry Query (if 0):    {retry_query}")
     print("-" * 70)
 
     # 4. Execute Apify Google Search Scraper
