@@ -58,7 +58,8 @@ def is_apify_credit_exhausted(err: Exception | str) -> bool:
         "account has run out of credit",
         "plan limit exceeded",
         "quota exceeded",
-        "credits are out"
+        "credits are out",
+        "exceeded remaining usage"
     ]
     return any(indicator in msg for indicator in credit_indicators)
 
@@ -96,7 +97,7 @@ def process_single_job(sh, control_sheet, job: dict) -> dict:
 
     try:
         # 2. Step 2: Google Search Scraper (includes retry, filtering, normalization, dedup, cross-check)
-        query_string, clean_urls = fetch_instagram_profiles_from_google(
+        query_string, status_msg, clean_urls = fetch_instagram_profiles_from_google(
             niche=niche,
             state=state,
             pages=pages,
@@ -151,8 +152,8 @@ def process_single_job(sh, control_sheet, job: dict) -> dict:
 
         total_duplicates_skipped = write_duplicates
 
-        # 5. Update Status to 'Done' in Control tab
-        update_job_status(control_sheet, row_num, "Done")
+        # 5. Update Status in Control tab
+        update_job_status(control_sheet, row_num, status_msg)
 
         # 6. Append Audit Log entry in 'Run Log' tab
         issues = [
@@ -160,7 +161,7 @@ def process_single_job(sh, control_sheet, job: dict) -> dict:
             for p in scraped_profiles
             if p.get('scrape_status') and p.get('scrape_status') != 'Success'
         ]
-        notes_summary = f"Successfully processed {leads_added} new lead(s)."
+        notes_summary = f"[{status_msg}] Successfully processed {leads_added} new lead(s)."
         if issues:
             notes_summary += f" Profile notes: {', '.join(issues[:5])}"
 
@@ -169,11 +170,11 @@ def process_single_job(sh, control_sheet, job: dict) -> dict:
             niche=niche,
             state=state,
             pages_searched=pages,
-            total_profiles=total_raw_found,
+            total_profiles=len(scraped_profiles),
             leads_added=leads_added,
             duplicates_skipped=total_duplicates_skipped,
-            garbage_skipped=0,
-            status="Done",
+            garbage_skipped=len(clean_urls) - len(scraped_profiles),
+            status=status_msg.split(' (')[0],  # "Done" or "Incomplete"
             notes=notes_summary
         )
 
@@ -201,8 +202,8 @@ def process_single_job(sh, control_sheet, job: dict) -> dict:
         # Check if error is due to Apify credits exhaustion
         if is_apify_credit_exhausted(err):
             print(f"\n[CRITICAL] Apify credits exhausted on Row {row_num} [{niche} / {state}]: {err_msg}")
-            # Reset row back to 'Pending' so it runs automatically next time
-            update_job_status(control_sheet, row_num, "Pending")
+            # Mark the current row as Failed (Credit limit exceeded) instead of Pending
+            update_job_status(control_sheet, row_num, "Failed (Credit limit exceeded)")
             append_run_log_entry(
                 sh=sh,
                 niche=niche,
@@ -212,7 +213,7 @@ def process_single_job(sh, control_sheet, job: dict) -> dict:
                 leads_added=0,
                 duplicates_skipped=0,
                 garbage_skipped=0,
-                status="Pending (Credits Out)",
+                status="Failed (Credits Out)",
                 notes=f"Halted: Apify credits exhausted ({err_msg[:150]})"
             )
             raise ApifyCreditsExhaustedError(err_msg)
@@ -321,7 +322,7 @@ def run_agent():
                 credit_exhaustion_job = job
                 credit_exhaustion_reason = str(unexpected_err)
                 try:
-                    update_job_status(control_sheet, job["row_number"], "Pending")
+                    update_job_status(control_sheet, job["row_number"], "Failed (Credit limit exceeded)")
                 except Exception:
                     pass
                 print("\n" + "!" * 70)
