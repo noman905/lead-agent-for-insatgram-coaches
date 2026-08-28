@@ -276,7 +276,8 @@ def fetch_instagram_profile_details(profile_urls: list[str], api_token: str = No
 
     clean_urls = filter_and_clean_profile_urls(profile_urls)
     if not clean_urls:
-        clean_urls = profile_urls
+        print("[WARNING] All provided URLs failed validation. No valid Instagram URLs to scrape.")
+        return []
 
     client = ApifyClient(token.strip())
 
