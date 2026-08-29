@@ -4,6 +4,7 @@ import sys
 import math
 from apify_client import ApifyClient
 import config
+from gender_filter import filter_candidate_profiles
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +221,8 @@ def _run_google_search_actor(client: ApifyClient, query: str, pages: int) -> dic
     """
     Executes the Apify Google Search Scraper actor for the given *query* and
     returns a dictionary containing:
-      - 'urls': ALL raw URLs from the result dataset (no filtering applied here)
+      - 'items': Raw result dicts [{'url': ..., 'title': ..., 'description': ...}]
+      - 'urls': ALL raw URLs from the result dataset
       - 'actual_pages': The number of distinct pages returned by Google
       - 'has_next_page': True if Google indicated there are more results
     Raises RuntimeError on actor failure.
@@ -265,9 +267,9 @@ def _run_google_search_actor(client: ApifyClient, query: str, pages: int) -> dic
 
     if not dataset_id:
         print("[WARNING] No dataset ID returned from actor execution.")
-        return {"urls": [], "actual_pages": 0, "has_next_page": False}
+        return {"items": [], "urls": [], "actual_pages": 0, "has_next_page": False}
 
-    all_urls = []
+    all_items = []
     pages_observed = set()
     has_next_page = False
     
@@ -286,18 +288,32 @@ def _run_google_search_actor(client: ApifyClient, query: str, pages: int) -> dic
             for result in item["organicResults"]:
                 u = result.get("url") or result.get("link")
                 if u:
-                    all_urls.append(u)
+                    all_items.append({
+                        "url": u,
+                        "title": result.get("title") or "",
+                        "description": result.get("description") or ""
+                    })
         # Case 2: item is a flattened result row containing url directly
         elif "url" in item and item["url"]:
-            all_urls.append(item["url"])
+            all_items.append({
+                "url": item["url"],
+                "title": item.get("title") or "",
+                "description": item.get("description") or ""
+            })
         elif "link" in item and item["link"]:
-            all_urls.append(item["link"])
+            all_items.append({
+                "url": item["link"],
+                "title": item.get("title") or "",
+                "description": item.get("description") or ""
+            })
 
-    print(f"[+] Raw URLs extracted from dataset: {len(all_urls)}")
+    all_urls = [it["url"] for it in all_items]
+    print(f"[+] Raw results extracted from dataset: {len(all_items)}")
     
-    actual_pages_count = len(pages_observed) if pages_observed else (1 if all_urls else 0)
+    actual_pages_count = len(pages_observed) if pages_observed else (1 if all_items else 0)
     
     return {
+        "items": all_items,
         "urls": all_urls,
         "actual_pages": actual_pages_count,
         "has_next_page": has_next_page
@@ -308,73 +324,79 @@ def _run_google_search_actor(client: ApifyClient, query: str, pages: int) -> dic
 # Full pipeline: clean / filter / normalize / deduplicate / cross-check
 # ---------------------------------------------------------------------------
 
-def _clean_and_filter_urls(raw_urls: list[str]) -> list[str]:
+def _clean_and_filter_candidates(raw_items: list[dict]) -> list[dict]:
     """
-    Applies the full 5-step URL cleaning pipeline:
+    Applies the full 5-step URL cleaning pipeline on candidate items:
       1. Keep only URLs containing instagram.com/
       2. Remove junk Instagram URLs (reels, posts, explore, stories, etc.)
       3. Normalise (lowercase, remove www., remove trailing slash)
-      4. Deduplicate within batch (preserve order)
+      4. Deduplicate within batch (preserve order and snippet metadata)
       5. Validate against Apify's Instagram URL regex (prevents actor crashes)
-    Returns a list of unique, normalised, validated Instagram profile URLs.
+    Returns a list of unique, normalised, validated candidate items.
     """
     # Step 1 — keep only instagram.com URLs
-    instagram_urls = [url for url in raw_urls if is_instagram_url(url)]
-    non_ig_count = len(raw_urls) - len(instagram_urls)
+    instagram_items = [it for it in raw_items if is_instagram_url(it.get("url", ""))]
+    non_ig_count = len(raw_items) - len(instagram_items)
     if non_ig_count:
         print(f"    - [FILTER] Removed {non_ig_count} non-Instagram URL(s)")
 
     # Step 2 — remove junk Instagram URLs
-    profile_urls = [url for url in instagram_urls if is_valid_profile_url(url)]
-    junk_count = len(instagram_urls) - len(profile_urls)
+    profile_items = [it for it in instagram_items if is_valid_profile_url(it.get("url", ""))]
+    junk_count = len(instagram_items) - len(profile_items)
     if junk_count:
         print(f"    - [FILTER] Removed {junk_count} junk Instagram URL(s) (posts/reels/explore/stories/params)")
 
-    # Step 3 — normalise
-    normalized = [normalize_url(url) for url in profile_urls]
+    # Step 3 — normalise URLs while keeping metadata
+    normalized_items = []
+    for it in profile_items:
+        normalized_items.append({
+            "url": normalize_url(it.get("url", "")),
+            "title": it.get("title", ""),
+            "description": it.get("description", "")
+        })
 
     # Step 4 — deduplicate (preserve order)
     seen = set()
-    unique_urls = []
-    for url in normalized:
-        if url not in seen:
-            seen.add(url)
-            unique_urls.append(url)
+    unique_items = []
+    for it in normalized_items:
+        u = it["url"]
+        if u not in seen:
+            seen.add(u)
+            unique_items.append(it)
 
-    dup_count = len(normalized) - len(unique_urls)
+    dup_count = len(normalized_items) - len(unique_items)
     if dup_count:
         print(f"    - [DEDUP]  Removed {dup_count} duplicate URL(s) within batch")
 
     # Step 5 — validate against Apify's Instagram URL regex pattern
-    # This prevents the "Field input.directUrls.X must match pattern" crash
-    validated = []
+    validated_items = []
     invalid_count = 0
-    for url in unique_urls:
-        if _APIFY_IG_URL_PATTERN.match(url):
-            validated.append(url)
+    for it in unique_items:
+        if _APIFY_IG_URL_PATTERN.match(it["url"]):
+            validated_items.append(it)
         else:
             invalid_count += 1
-            print(f"    - [INVALID] Rejected URL (bad pattern): {url}")
+            print(f"    - [INVALID] Rejected URL (bad pattern): {it['url']}")
     if invalid_count:
         print(f"    - [VALIDATE] Removed {invalid_count} URL(s) that don't match Apify's required Instagram pattern")
 
-    return validated
+    return validated_items
 
 
-def _cross_check_leads(unique_urls: list[str], existing_leads_urls: set[str]) -> tuple[list[str], int]:
+def _cross_check_candidate_leads(unique_items: list[dict], existing_leads_urls: set[str]) -> tuple[list[dict], int]:
     """
-    Removes URLs that already exist in the Leads tab.
-    Returns (new_urls, skipped_count).
+    Removes candidate items whose URLs already exist in the Leads tab.
+    Returns (new_items, skipped_count).
     """
-    new_urls = []
+    new_items = []
     skipped = 0
-    for url in unique_urls:
-        if url in existing_leads_urls:
+    for it in unique_items:
+        if it["url"] in existing_leads_urls:
             skipped += 1
-            print(f"    - [CREDIT SAVED] Skipping '{url}' (already in Leads tab)")
+            print(f"    - [CREDIT SAVED] Skipping '{it['url']}' (already in Leads tab)")
         else:
-            new_urls.append(url)
-    return new_urls, skipped
+            new_items.append(it)
+    return new_items, skipped
 
 
 # ---------------------------------------------------------------------------
@@ -390,7 +412,7 @@ def fetch_instagram_profiles_from_google(
 ) -> tuple[str, str, list[str]]:
     """
     Runs the full multi-query Google-search → filter → normalise → dedup → cross-check
-    pipeline and returns (queries_summary, status_msg, final_clean_urls).
+    → GENDER PRE-FILTER pipeline and returns (queries_summary, status_msg, final_clean_urls).
 
     Uses multiple query variations to maximize unique profile discovery.
     Applies smart page scaling for small/medium states to save credits.
@@ -398,6 +420,9 @@ def fetch_instagram_profiles_from_google(
 
     When *sh* (spreadsheet handle) is provided the results are cross-checked
     against existing Leads tab URLs to save Apify credits.
+
+    The Gender Pre-Filter executes right before returning URLs, eliminating
+    100% confirmed female profiles before any Apify Instagram scraping.
     """
     token = api_token or config.APIFY_API_TOKEN
     if not token or token.strip() in ("", "your_apify_api_token_here"):
@@ -432,7 +457,7 @@ def fetch_instagram_profiles_from_google(
     if city_name:
         print(f"    - City-level search: {city_name}, {state_name}")
 
-    all_raw_urls = []
+    all_raw_items = []
     queries_used = []
     total_actual_pages = 0
     any_has_next = False
@@ -443,7 +468,7 @@ def fetch_instagram_profiles_from_google(
         print(f"\n--- Query {i}/{num_queries} ({q_pages} page(s)): {query} ---")
         try:
             result = _run_google_search_actor(client, query, q_pages)
-            urls = result["urls"]
+            items = result.get("items", [])
             actual_pages = result["actual_pages"]
             has_next = result["has_next_page"]
             
@@ -452,13 +477,13 @@ def fetch_instagram_profiles_from_google(
                 print(f"[!] Incomplete run detected: Got {actual_pages}/{q_pages} pages. Retrying with alternate query...")
                 retry_query = query.replace('instagram.com', 'site:instagram.com') if 'site:' not in query else query.replace('site:instagram.com', 'instagram.com')
                 retry_result = _run_google_search_actor(client, retry_query, q_pages - actual_pages)
-                urls.extend(retry_result["urls"])
+                items.extend(retry_result.get("items", []))
                 actual_pages += retry_result["actual_pages"]
                 has_next = retry_result["has_next_page"]
                 supplemented_queries.append(retry_query)
                 queries_used.append(retry_query)
             
-            all_raw_urls.extend(urls)
+            all_raw_items.extend(items)
             queries_used.append(query)
             total_actual_pages += actual_pages
             if has_next:
@@ -471,21 +496,22 @@ def fetch_instagram_profiles_from_google(
                 raise
             print(f"[WARNING] Query {i} failed: {e}. Continuing with remaining queries...")
 
-    # --- Clean, filter, validate, and deduplicate merged results ---
-    unique_urls = _clean_and_filter_urls(all_raw_urls)
+    # --- Clean, filter, validate, and deduplicate merged candidate items ---
+    unique_candidates = _clean_and_filter_candidates(all_raw_items)
 
     # --- If all queries returned 0 profiles, try the legacy retry query ---
-    if not unique_urls:
+    if not unique_candidates:
         retry_query = build_retry_query(niche, state_name)
         print(f"\n[RETRY] All {num_queries} queries returned 0 profile URLs. Final retry with: {retry_query}")
         try:
             result = _run_google_search_actor(client, retry_query, effective_pages)
-            unique_urls = _clean_and_filter_urls(result["urls"])
-            all_raw_urls.extend(result["urls"])
+            retry_items = result.get("items", [])
+            unique_candidates = _clean_and_filter_candidates(retry_items)
+            all_raw_items.extend(retry_items)
             total_actual_pages += result["actual_pages"]
             if result["has_next_page"]:
                 any_has_next = True
-            if unique_urls:
+            if unique_candidates:
                 queries_used.append(retry_query)
         except Exception as e:
             error_msg = str(e).lower()
@@ -495,9 +521,22 @@ def fetch_instagram_profiles_from_google(
 
     # --- Cross-check against existing Leads tab ---
     leads_skipped = 0
-    if sh is not None and unique_urls:
+    if sh is not None and unique_candidates:
         existing = get_existing_leads_urls(sh)
-        unique_urls, leads_skipped = _cross_check_leads(unique_urls, existing)
+        unique_candidates, leads_skipped = _cross_check_candidate_leads(unique_candidates, existing)
+
+    # --- NEW PHASE: Smart Gender Pre-Filter ---
+    surviving_candidates = unique_candidates
+    filter_metrics = {"total_input": len(unique_candidates), "tier1_removed": 0, "tier2_sent": 0, "tier2_removed": 0, "kept_total": len(unique_candidates)}
+    
+    if unique_candidates:
+        surviving_candidates, filter_metrics = filter_candidate_profiles(
+            candidates=unique_candidates,
+            groq_api_key=config.GROQ_API_KEY,
+            gemini_api_key=config.GEMINI_API_KEY
+        )
+
+    final_clean_urls = [cand["url"] for cand in surviving_candidates]
 
     # --- Summary and Status Logic ---
     queries_summary = queries_used[0] if queries_used else build_search_query(niche, state_name)
@@ -512,13 +551,17 @@ def fetch_instagram_profiles_from_google(
         if supplemented_queries:
             status_msg += f", supplemented with alternate query"
 
-    print(f"\n[+] Total raw Google URLs (all queries):   {len(all_raw_urls)}")
-    print(f"[+] Clean unique Instagram profiles:       {len(unique_urls) + leads_skipped}")
+    total_removed_by_filter = filter_metrics["tier1_removed"] + filter_metrics["tier2_removed"]
+
+    print(f"\n[+] Total raw Google results (all queries):   {len(all_raw_items)}")
+    print(f"[+] Unique Instagram profiles before filter:   {len(unique_candidates) + leads_skipped}")
     if leads_skipped:
-        print(f"[+] Already in Leads tab (skipped):        {leads_skipped}")
-    print(f"[+] Final new URLs to scrape:              {len(unique_urls)}")
+        print(f"[+] Already in Leads tab (skipped):           {leads_skipped}")
+    print(f"[+] Removed by Gender Pre-Filter:             {total_removed_by_filter}")
+    print(f"[+] Final candidate URLs to scrape via Apify: {len(final_clean_urls)}")
 
     print(f"[SUCCESS] {status_msg}")
-    print(f"Extracted {len(unique_urls)} new unique Instagram profile URL(s) from {len(queries_used)} Google Search query(ies).")
+    print(f"Extracted {len(final_clean_urls)} new unique Instagram profile URL(s) to scrape from {len(queries_used)} Google Search query(ies).")
     
-    return queries_summary, status_msg, unique_urls
+    return queries_summary, status_msg, final_clean_urls
+

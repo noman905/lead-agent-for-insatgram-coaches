@@ -36,8 +36,11 @@ jobs:
           GOOGLE_SERVICE_ACCOUNT_FILE: credentials.json
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
           APIFY_API_TOKEN: ${{ secrets.APIFY_API_TOKEN }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           EMAIL_ADDRESS: ${{ secrets.EMAIL_ADDRESS }}
           EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
         run: |
           python run_agent.py
+

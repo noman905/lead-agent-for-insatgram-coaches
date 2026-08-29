@@ -9,12 +9,13 @@ GOOGLE_SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "credenti
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
 APIFY_API_TOKEN = os.getenv("APIFY_API_TOKEN", "")
 
+# AI Model APIs for Gender Pre-Filter (Tier 2)
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+
 # SMTP Email Configuration
 SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SENDER_EMAIL = os.getenv("EMAIL_ADDRESS") or os.getenv("SENDER_EMAIL", "")
 SENDER_PASSWORD = os.getenv("EMAIL_APP_PASSWORD") or os.getenv("SENDER_PASSWORD", "")
 RECIPIENT_EMAIL = os.getenv("RECIPIENT_EMAIL") or SENDER_EMAIL
-
-
-
