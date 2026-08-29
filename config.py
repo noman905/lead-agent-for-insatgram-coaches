@@ -5,9 +5,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Centralized configuration settings
+GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
 GOOGLE_SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "credentials.json")
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
 APIFY_API_TOKEN = os.getenv("APIFY_API_TOKEN", "")
+
 
 # AI Model APIs for Gender Pre-Filter (Tier 2)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")

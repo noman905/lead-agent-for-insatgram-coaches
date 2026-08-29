@@ -25,14 +25,42 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Verify Environment & Secrets Diagnostics
+        env:
+          HAS_SA_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON != '' }}
+          HAS_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID != '' }}
+          HAS_APIFY: ${{ secrets.APIFY_API_TOKEN != '' }}
+          HAS_GROQ: ${{ secrets.GROQ_API_KEY != '' }}
+          HAS_GEMINI: ${{ secrets.GEMINI_API_KEY != '' }}
+          HAS_EMAIL: ${{ secrets.EMAIL_ADDRESS != '' }}
+          HAS_EMAIL_PWD: ${{ secrets.EMAIL_APP_PASSWORD != '' }}
+        run: |
+          echo "=================================================="
+          echo " GITHUB SECRETS CONFIGURATION AUDIT"
+          echo "=================================================="
+          echo " GOOGLE_SERVICE_ACCOUNT_JSON configured : $HAS_SA_JSON"
+          echo " GOOGLE_SHEET_ID configured             : $HAS_SHEET_ID"
+          echo " APIFY_API_TOKEN configured             : $HAS_APIFY"
+          echo " GROQ_API_KEY configured                : $HAS_GROQ"
+          echo " GEMINI_API_KEY configured              : $HAS_GEMINI"
+          echo " EMAIL_ADDRESS configured               : $HAS_EMAIL"
+          echo " EMAIL_APP_PASSWORD configured          : $HAS_EMAIL_PWD"
+          echo "=================================================="
+
       - name: Create credentials.json from Secret
         env:
           SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
         run: |
-          echo "$SERVICE_ACCOUNT_JSON" > credentials.json
+          if [ -n "$SERVICE_ACCOUNT_JSON" ]; then
+            echo "$SERVICE_ACCOUNT_JSON" > credentials.json
+            echo "[+] Successfully generated credentials.json from GOOGLE_SERVICE_ACCOUNT_JSON."
+          else
+            echo "[WARNING] GOOGLE_SERVICE_ACCOUNT_JSON secret is empty or missing."
+          fi
 
       - name: Run Instagram Lead Generation Agent
         env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           GOOGLE_SERVICE_ACCOUNT_FILE: credentials.json
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
           APIFY_API_TOKEN: ${{ secrets.APIFY_API_TOKEN }}
@@ -42,5 +70,4 @@ jobs:
           EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
         run: |
-          python run_agent.py
-
+          python -u run_agent.py

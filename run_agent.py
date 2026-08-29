@@ -274,26 +274,70 @@ def process_single_job(sh, control_sheet, job: dict) -> dict:
         }
 
 
+import json
+
+def get_gspread_client():
+    """
+    Connects to Google Sheets via gspread using either:
+    1. GOOGLE_SERVICE_ACCOUNT_JSON environment variable (direct JSON string from GitHub Secret)
+    2. GOOGLE_SERVICE_ACCOUNT_FILE on disk (e.g. credentials.json)
+    3. credentials.json or credentials.json.json
+    """
+    sa_json_str = config.GOOGLE_SERVICE_ACCOUNT_JSON or os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+    if sa_json_str and sa_json_str.strip() not in ("", "your_service_account_json_here"):
+        try:
+            sa_info = json.loads(sa_json_str.strip())
+            print("[+] Authenticating Google Sheets via GOOGLE_SERVICE_ACCOUNT_JSON environment variable...")
+            return gspread.service_account_from_dict(sa_info)
+        except Exception as e:
+            print(f"[WARNING] Failed to parse GOOGLE_SERVICE_ACCOUNT_JSON as JSON ({e}). Falling back to credentials file...")
+
+    sa_file = config.GOOGLE_SERVICE_ACCOUNT_FILE
+    if not os.path.exists(sa_file) and os.path.exists("credentials.json.json"):
+        sa_file = "credentials.json.json"
+    if not os.path.exists(sa_file) and os.path.exists("credentials.json"):
+        sa_file = "credentials.json"
+
+    if os.path.exists(sa_file):
+        try:
+            if os.path.getsize(sa_file) > 10:
+                print(f"[+] Authenticating Google Sheets via file '{sa_file}'...")
+                return gspread.service_account(filename=sa_file)
+            else:
+                print(f"[WARNING] Credentials file '{sa_file}' is empty (size <= 10 bytes).")
+        except Exception as e:
+            print(f"[ERROR] Failed to load service account file '{sa_file}': {e}")
+            raise
+
+    raise FileNotFoundError(
+        "[ERROR] Google Service Account credentials not found! "
+        "Please provide GOOGLE_SERVICE_ACCOUNT_JSON in GitHub Secrets or place 'credentials.json' in the project directory."
+    )
+
+
 def run_agent():
     print("=" * 70)
     print(" INSTAGRAM LEAD GENERATION AGENT - MAIN RUNNER")
     print("=" * 70)
 
-    service_account_file = config.GOOGLE_SERVICE_ACCOUNT_FILE
     sheet_id = config.GOOGLE_SHEET_ID
     apify_token = config.APIFY_API_TOKEN
 
-    if not os.path.exists(service_account_file):
-        print(f"[ERROR] Service account file '{service_account_file}' not found.")
+    if not apify_token or apify_token.strip() in ("", "your_apify_api_token_here"):
+        print("[ERROR] APIFY_API_TOKEN is missing or not configured in environment variables / .env file.")
         sys.exit(1)
 
-    if not apify_token or apify_token.strip() in ("", "your_apify_api_token_here"):
-        print("[ERROR] APIFY_API_TOKEN is missing or not configured in .env file.")
+    if not sheet_id or sheet_id.strip() in ("", "your_google_sheet_id_here"):
+        print("[ERROR] GOOGLE_SHEET_ID is missing or not configured in environment variables / .env file.")
         sys.exit(1)
 
     # 1. Connect to Google Sheets
-    print(f"[+] Connecting to Google Sheets API ({service_account_file})...")
-    gc = gspread.service_account(filename=service_account_file)
+    try:
+        gc = get_gspread_client()
+    except Exception as e:
+        print(f"[ERROR] Could not authenticate with Google Sheets: {e}")
+        sys.exit(1)
+
     try:
         sh = gc.open_by_key(sheet_id)
     except Exception:
@@ -306,6 +350,7 @@ def run_agent():
     # 2. Read Queue Jobs from Control tab
     control_sheet = sh.worksheet("Control")
     all_jobs = get_control_jobs(control_sheet)
+
 
     pending_jobs = [j for j in all_jobs if j["status"].strip().lower() == "pending"]
 
