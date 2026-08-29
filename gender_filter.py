@@ -1,8 +1,10 @@
 import os
 import re
 import sys
+import time
 from urllib.parse import urlparse
 import config
+
 
 # ---------------------------------------------------------------------------
 # Curated Name Dictionaries
@@ -301,7 +303,7 @@ Is this person definitely a woman? Answer only YES or NO. If uncertain answer NO
 
 def _call_groq_api(name: str, username: str, bio: str, api_key: str) -> str | None:
     """
-    Calls Groq API with llama-3.1-8b-instant.
+    Calls Groq API with fast active model (qwen/qwen3.8-27b / llama-3.1-8b-instant).
     Returns 'YES', 'NO', or None (if failed/quota/error).
     """
     if not api_key or api_key.strip() in ("", "your_groq_api_key_here"):
@@ -309,20 +311,30 @@ def _call_groq_api(name: str, username: str, bio: str, api_key: str) -> str | No
 
     try:
         from groq import Groq
-        client = Groq(api_key=api_key.strip())
+        client = Groq(api_key=api_key.strip(), timeout=10.0)
         prompt = TIER2_PROMPT_TEMPLATE.format(name=name or "N/A", username=username or "N/A", bio=bio or "N/A")
         
-        response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.0,
-            max_tokens=10
-        )
-        
-        answer = response.choices[0].message.content.strip().upper()
-        if "YES" in answer:
-            return "YES"
-        return "NO"
+        for model in ["qwen/qwen3.8-27b", "llama-3.1-8b-instant"]:
+            try:
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": "You are a precise classifier determining if an Instagram account owner is definitely a woman. Answer only YES or NO."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.0,
+                    max_tokens=10
+                )
+                answer = response.choices[0].message.content.strip().upper()
+                if "YES" in answer:
+                    return "YES"
+                return "NO"
+            except Exception as me:
+                if "model_not_found" in str(me) or "does not exist" in str(me):
+                    continue
+                raise me
+
+        return None
     except Exception as e:
         print(f"    - [TIER 2 WARNING] Groq API call failed ({e}). Falling back to next tier...")
         return None
@@ -330,7 +342,8 @@ def _call_groq_api(name: str, username: str, bio: str, api_key: str) -> str | No
 
 def _call_gemini_api(name: str, username: str, bio: str, api_key: str) -> str | None:
     """
-    Calls Google Gemini API with gemini-2.0-flash / gemini-1.5-flash.
+    Calls Google Gemini API with native google-genai SDK.
+    Supports AQ. and AIza keys across gemini-3.6-flash / gemini-3.7-flash / gemini-flash-latest.
     Returns 'YES', 'NO', or None (if failed/quota/error).
     """
     if not api_key or api_key.strip() in ("", "your_gemini_api_key_here"):
@@ -341,32 +354,28 @@ def _call_gemini_api(name: str, username: str, bio: str, api_key: str) -> str | 
         client = genai.Client(api_key=api_key.strip())
         prompt = TIER2_PROMPT_TEMPLATE.format(name=name or "N/A", username=username or "N/A", bio=bio or "N/A")
         
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=prompt
-        )
-        
-        answer = (response.text or "").strip().upper()
-        if "YES" in answer:
-            return "YES"
-        return "NO"
+        for model in ["gemini-3.6-flash", "gemini-3.7-flash", "gemini-flash-latest"]:
+            try:
+                response = client.models.generate_content(
+                    model=model,
+                    contents=prompt
+                )
+                answer = (response.text or "").strip().upper()
+                if "YES" in answer:
+                    return "YES"
+                return "NO"
+            except Exception as me:
+                if "not found" in str(me) or "404" in str(me):
+                    continue
+                raise me
+
+        return None
     except Exception as e:
-        # Fallback attempt to gemini-1.5-flash if 2.0 has issue
-        try:
-            from google import genai
-            client = genai.Client(api_key=api_key.strip())
-            prompt = TIER2_PROMPT_TEMPLATE.format(name=name or "N/A", username=username or "N/A", bio=bio or "N/A")
-            response = client.models.generate_content(
-                model="gemini-1.5-flash",
-                contents=prompt
-            )
-            answer = (response.text or "").strip().upper()
-            if "YES" in answer:
-                return "YES"
-            return "NO"
-        except Exception as e2:
-            print(f"    - [TIER 2 WARNING] Gemini API call failed ({e2}). Falling back to safe keep...")
-            return None
+        print(f"    - [TIER 2 WARNING] Gemini API call failed ({e}). Falling back to safe keep...")
+        return None
+
+
+
 
 
 def evaluate_tier2_ai(
@@ -383,8 +392,9 @@ def evaluate_tier2_ai(
       Priority 3: Safe Keep (Log warning & keep profile)
     Returns: (action, reason, provider) where provider is 'groq', 'gemini', or 'none'
     """
-    groq_key = groq_api_key or config.GROQ_API_KEY
-    gemini_key = gemini_api_key or config.GEMINI_API_KEY
+    groq_key = config.GROQ_API_KEY if groq_api_key is None else groq_api_key
+    gemini_key = config.GEMINI_API_KEY if gemini_api_key is None else gemini_api_key
+
 
     # Priority 1: Groq
     groq_res = _call_groq_api(name, username, bio, groq_key)
