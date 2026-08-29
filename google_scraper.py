@@ -519,13 +519,7 @@ def fetch_instagram_profiles_from_google(
                 raise
             print(f"[WARNING] Retry query also failed: {e}")
 
-    # --- Cross-check against existing Leads tab ---
-    leads_skipped = 0
-    if sh is not None and unique_candidates:
-        existing = get_existing_leads_urls(sh)
-        unique_candidates, leads_skipped = _cross_check_candidate_leads(unique_candidates, existing)
-
-    # --- NEW PHASE: Smart Gender Pre-Filter ---
+    # --- NEW PHASE: Smart Gender Pre-Filter (Tier 1 & Tier 2) ---
     surviving_candidates = unique_candidates
     filter_metrics = {"total_input": len(unique_candidates), "tier1_removed": 0, "tier2_sent": 0, "tier2_removed": 0, "kept_total": len(unique_candidates)}
     
@@ -536,7 +530,14 @@ def fetch_instagram_profiles_from_google(
             gemini_api_key=config.GEMINI_API_KEY
         )
 
+    # --- Cross-check surviving candidate leads against existing Leads tab ---
+    leads_skipped = 0
+    if sh is not None and surviving_candidates:
+        existing = get_existing_leads_urls(sh)
+        surviving_candidates, leads_skipped = _cross_check_candidate_leads(surviving_candidates, existing)
+
     final_clean_urls = [cand["url"] for cand in surviving_candidates]
+
 
     # --- Summary and Status Logic ---
     queries_summary = queries_used[0] if queries_used else build_search_query(niche, state_name)

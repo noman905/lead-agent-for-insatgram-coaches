@@ -106,30 +106,57 @@ def process_single_job(sh, control_sheet, job: dict) -> dict:
         )
         total_raw_found = len(clean_urls)
 
-        # Check for zero results (primary + retry both returned 0)
+        # Check if zero new URLs to scrape
         if total_raw_found == 0:
-            err_msg = "Google Search actor returned 0 results after retry"
-            print(f"[WARNING] {err_msg}")
-            update_job_status(control_sheet, row_num, f"Failed: {err_msg}")
-            append_run_log_entry(
-                sh=sh,
-                niche=niche,
-                state=state,
-                pages_searched=pages,
-                total_profiles=0,
-                leads_added=0,
-                duplicates_skipped=0,
-                garbage_skipped=0,
-                status="Failed",
-                notes=err_msg
-            )
-            return {
-                "status": "Failed",
-                "row_number": row_num,
-                "niche": niche,
-                "state": state,
-                "error": err_msg
-            }
+            if "Done" in status_msg:
+                note_msg = "0 new unique profiles (all existing in Leads tab or filtered)"
+                print(f"[+] {note_msg}")
+                update_job_status(control_sheet, row_num, status_msg)
+                append_run_log_entry(
+                    sh=sh,
+                    niche=niche,
+                    state=state,
+                    pages_searched=pages,
+                    total_profiles=0,
+                    leads_added=0,
+                    duplicates_skipped=0,
+                    garbage_skipped=0,
+                    status="Done",
+                    notes=note_msg
+                )
+                return {
+                    "status": "Done",
+                    "row_number": row_num,
+                    "niche": niche,
+                    "state": state,
+                    "leads_added": 0,
+                    "duplicates_skipped": 0,
+                    "total_found": 0
+                }
+            else:
+                err_msg = "Google Search actor returned 0 results after retry"
+                print(f"[WARNING] {err_msg}")
+                update_job_status(control_sheet, row_num, f"Failed: {err_msg}")
+                append_run_log_entry(
+                    sh=sh,
+                    niche=niche,
+                    state=state,
+                    pages_searched=pages,
+                    total_profiles=0,
+                    leads_added=0,
+                    duplicates_skipped=0,
+                    garbage_skipped=0,
+                    status="Failed",
+                    notes=err_msg
+                )
+                return {
+                    "status": "Failed",
+                    "row_number": row_num,
+                    "niche": niche,
+                    "state": state,
+                    "error": err_msg
+                }
+
 
         print(f"[+] Clean new URLs to scrape via Apify: {total_raw_found}")
         print("-" * 70)
