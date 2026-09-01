@@ -97,26 +97,57 @@ def build_query_variations(niche: str, state: str, city: str = "") -> list[str]:
     location = city if city else state
     niche_clean = niche.strip()
     location_clean = location.strip()
+    
+    # -------------------------------------------------------------
+    # NEW FEATURE: Google "OR" Query Packing
+    # Packs dense synonyms for high-population states/cities to 
+    # extract maximum leads per Google Search page.
+    # -------------------------------------------------------------
+    LOCATION_PACKS = {
+        "new york": '("New York" OR "NYC" OR "Manhattan" OR "Brooklyn" OR "NY")',
+        "california": '("California" OR "CA" OR "Los Angeles" OR "San Francisco" OR "SoCal")',
+        "texas": '("Texas" OR "TX" OR "Austin" OR "Dallas" OR "Houston")',
+        "florida": '("Florida" OR "FL" OR "Miami" OR "Orlando" OR "Tampa")',
+        "illinois": '("Illinois" OR "IL" OR "Chicago")',
+        "georgia": '("Georgia" OR "GA" OR "Atlanta")',
+        "pennsylvania": '("Pennsylvania" OR "PA" OR "Philadelphia" OR "Philly")',
+        "massachusetts": '("Massachusetts" OR "MA" OR "Boston")',
+        "washington": '("Washington" OR "WA" OR "Seattle")',
+        "colorado": '("Colorado" OR "CO" OR "Denver")',
+        "arizona": '("Arizona" OR "AZ" OR "Phoenix")',
+        "new jersey": '("New Jersey" OR "NJ" OR "Jersey")',
+    }
+    
+    loc_key = location_clean.lower()
+    if loc_key in LOCATION_PACKS:
+        loc_str = LOCATION_PACKS[loc_key]
+    else:
+        loc_str = f'"{location_clean}"'
 
     # Build coaching variant (e.g., "Executive Coach" -> "Executive Coaching")
     coaching_variant = niche_clean.replace("Coach", "Coaching").replace("coach", "coaching")
 
     queries = [
         # Q1: Original exact match (current approach)
-        f'"{niche_clean}" "{location_clean}" instagram.com',
+        f'"{niche_clean}" {loc_str} instagram.com',
         # Q2: site: operator forces only instagram.com domain, different ranking
-        f'"{niche_clean}" "{location_clean}" site:instagram.com',
+        f'"{niche_clean}" {loc_str} site:instagram.com',
         # Q3: Unquoted broad match finds partial/related keyword matches
         f'{niche_clean} {location_clean} instagram',
     ]
 
     # Q4: Coaching variant (only if meaningfully different from original)
     if coaching_variant.lower() != niche_clean.lower():
-        queries.append(f'"{coaching_variant}" "{location_clean}" instagram.com')
+        queries.append(f'"{coaching_variant}" {loc_str} instagram.com')
 
     # Q5: If city was provided, also include a state-level query for broader coverage
     if city:
-        queries.append(f'"{niche_clean}" "{state.strip()}" site:instagram.com')
+        state_key = state.strip().lower()
+        if state_key in LOCATION_PACKS:
+            state_str = LOCATION_PACKS[state_key]
+        else:
+            state_str = f'"{state.strip()}"'
+        queries.append(f'"{niche_clean}" {state_str} site:instagram.com')
 
     return queries
 
@@ -291,20 +322,23 @@ def _run_google_search_actor(client: ApifyClient, query: str, pages: int) -> dic
                     all_items.append({
                         "url": u,
                         "title": result.get("title") or "",
-                        "description": result.get("description") or ""
+                        "description": result.get("description") or "",
+                        "websiteTitle": result.get("websiteTitle") or result.get("siteName") or ""
                     })
         # Case 2: item is a flattened result row containing url directly
         elif "url" in item and item["url"]:
             all_items.append({
                 "url": item["url"],
                 "title": item.get("title") or "",
-                "description": item.get("description") or ""
+                "description": item.get("description") or "",
+                "websiteTitle": item.get("websiteTitle") or item.get("siteName") or ""
             })
         elif "link" in item and item["link"]:
             all_items.append({
                 "url": item["link"],
                 "title": item.get("title") or "",
-                "description": item.get("description") or ""
+                "description": item.get("description") or "",
+                "websiteTitle": item.get("websiteTitle") or item.get("siteName") or ""
             })
 
     all_urls = [it["url"] for it in all_items]
@@ -324,14 +358,27 @@ def _run_google_search_actor(client: ApifyClient, query: str, pages: int) -> dic
 # Full pipeline: clean / filter / normalize / deduplicate / cross-check
 # ---------------------------------------------------------------------------
 
+def extract_username_from_google_result(item: dict) -> str | None:
+    """Extracts username from 'Instagram · username' pattern in websiteTitle, siteName, or title."""
+    fields_to_check = [item.get("websiteTitle", ""), item.get("title", "")]
+    for field in fields_to_check:
+        if field and "Instagram" in field:
+            # Google sometimes returns 'Instagram · username', 'Instagram•username', or 'Instagramusername'
+            # This regex looks for 'Instagram' followed by any non-word separator, then captures the username.
+            match = re.search(r'Instagram\s*[^a-zA-Z0-9_.]+\s*([a-zA-Z0-9._]+)', field, re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+    return None
+
 def _clean_and_filter_candidates(raw_items: list[dict]) -> list[dict]:
     """
-    Applies the full 5-step URL cleaning pipeline on candidate items:
+    Applies the full URL cleaning pipeline on candidate items:
       1. Keep only URLs containing instagram.com/
-      2. Remove junk Instagram URLs (reels, posts, explore, stories, etc.)
-      3. Normalise (lowercase, remove www., remove trailing slash)
-      4. Deduplicate within batch (preserve order and snippet metadata)
-      5. Validate against Apify's Instagram URL regex (prevents actor crashes)
+      2. Recover profile URLs from reels/posts using 'Instagram · username' pattern
+      3. Remove remaining junk Instagram URLs
+      4. Normalise (lowercase, remove www., remove trailing slash)
+      5. Deduplicate within batch (preserve order and snippet metadata)
+      6. Validate against Apify's Instagram URL regex (prevents actor crashes)
     Returns a list of unique, normalised, validated candidate items.
     """
     # Step 1 — keep only instagram.com URLs
@@ -340,11 +387,31 @@ def _clean_and_filter_candidates(raw_items: list[dict]) -> list[dict]:
     if non_ig_count:
         print(f"    - [FILTER] Removed {non_ig_count} non-Instagram URL(s)")
 
-    # Step 2 — remove junk Instagram URLs
-    profile_items = [it for it in instagram_items if is_valid_profile_url(it.get("url", ""))]
+    # Step 2 & 3 — Handle profile URLs and convert junk URLs if possible
+    profile_items = []
+    recovered_count = 0
+    
+    for it in instagram_items:
+        original_url = it.get("url", "")
+        if is_valid_profile_url(original_url):
+            profile_items.append(it)
+        else:
+            # It's a reel, post, etc. Try to recover the profile URL
+            username = extract_username_from_google_result(it)
+            if username:
+                recovered_url = f"https://www.instagram.com/{username}/"
+                # Create a copy so we don't modify the original item reference in unintended ways
+                recovered_item = it.copy()
+                recovered_item["url"] = recovered_url
+                profile_items.append(recovered_item)
+                recovered_count += 1
+
+    if recovered_count:
+        print(f"    - [RECOVERY] Recovered {recovered_count} profile(s) from reels/posts using Google snippet data")
+
     junk_count = len(instagram_items) - len(profile_items)
     if junk_count:
-        print(f"    - [FILTER] Removed {junk_count} junk Instagram URL(s) (posts/reels/explore/stories/params)")
+        print(f"    - [FILTER] Removed {junk_count} junk Instagram URL(s) that couldn't be recovered")
 
     # Step 3 — normalise URLs while keeping metadata
     normalized_items = []
